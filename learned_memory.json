@@ -1,0 +1,15 @@
+{
+  "drawing_prefixes": [
+    "BISPL-TCM-STR-FD-T5"
+  ],
+  "known_projects": [
+    "AMARAVATI STATE SECRETARIAT & HEADS OF DEPARTMENT OFFICE BUILDINGS (TOWER TCM) AMARAVATI, ANDHRA PRADESH, INDIA"
+  ],
+  "known_clients": [
+    "Andhra Pradesh Capital Region Development Authority"
+  ],
+  "manual_corrections": {},
+  "pattern_weights": {},
+  "total_extractions_learned": 1,
+  "last_updated": "2026-10-09 19:19:01"
+}
