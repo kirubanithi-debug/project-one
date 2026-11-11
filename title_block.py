@@ -18,9 +18,10 @@ def preprocess_image_for_ocr(cv_img):
     """
     Applies image processing steps to optimize OCR accuracy:
     - Grayscale conversion
-    - Noise removal (Bilateral filter to preserve text edges)
+    - Noise removal (Bilateral filter to preserve sharp text edges without blurring)
     - Contrast enhancement (CLAHE: Contrast Limited Adaptive Histogram Equalization)
-    - Thresholding (Adaptive threshold to create sharp black-and-white text)
+    Preserves fine character details and stroke weights, allowing Tesseract's
+    neural network to read characters accurately without synthetic thresholding artifacts.
     """
     try:
         # 1. Convert to grayscale if it isn't already
@@ -29,22 +30,14 @@ def preprocess_image_for_ocr(cv_img):
         else:
             gray = cv_img.copy()
 
-        # 2. Denoise using bilateral filter (removes noise but keeps text boundaries sharp)
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+        # 2. Denoise using gentle bilateral filter (removes paper noise while keeping text boundaries sharp)
+        denoised = cv2.bilateralFilter(gray, 5, 50, 50)
 
         # 3. Enhance Contrast using CLAHE
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
         contrast_enhanced = clahe.apply(denoised)
 
-        # 4. Adaptive Thresholding to separate text from background
-        # Using ADAPTIVE_THRESH_GAUSSIAN_C for smoother thresholds
-        binary = cv2.adaptiveThreshold(
-            contrast_enhanced, 255, 
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 15, 8
-        )
-
-        return binary
+        return contrast_enhanced
     except Exception as e:
         logging.error(f"Error preprocessing image for OCR: {e}")
         # If preprocessing fails, return the simple grayscale conversion

@@ -28,20 +28,27 @@ def run_ocr(pil_image):
         raise FileNotFoundError(err_msg)
 
     try:
-        # Try PSM 6 first (Assumes a single uniform block of text - optimal for tables/title blocks)
+        # 1. Try PSM 6 first (Optimal for single uniform block of tabular text / title blocks)
         config_psm6 = r'--oem 3 --psm 6'
         text_psm6 = pytesseract.image_to_string(pil_image, config=config_psm6)
         
-        # If PSM 6 yielded reasonable text, return it
-        if len(text_psm6.strip()) > 30:
-            logging.info("Tesseract OCR (PSM 6) completed successfully.")
+        # If PSM 6 yielded rich structured text, return it
+        if len(text_psm6.strip()) > 40:
+            logging.info(f"Tesseract OCR (PSM 6) completed successfully ({len(text_psm6.strip())} chars).")
             return text_psm6
             
-        # Fallback to PSM 3 (Fully automatic page segmentation)
+        # 2. Try PSM 3 (Fully automatic page segmentation)
         config_psm3 = r'--oem 3 --psm 3'
         text_psm3 = pytesseract.image_to_string(pil_image, config=config_psm3)
-        logging.info("Tesseract OCR (PSM 3 fallback) completed successfully.")
-        return text_psm3 if len(text_psm3.strip()) > len(text_psm6.strip()) else text_psm6
+        
+        # 3. Try PSM 11 (Sparse text - finds as much text as possible in no particular order)
+        config_psm11 = r'--oem 3 --psm 11'
+        text_psm11 = pytesseract.image_to_string(pil_image, config=config_psm11)
+
+        candidates = [text_psm6, text_psm3, text_psm11]
+        best_text = max(candidates, key=lambda t: len(t.strip()))
+        logging.info(f"Tesseract OCR multi-pass complete. Best yield: {len(best_text.strip())} chars.")
+        return best_text
         
     except Exception as e:
         logging.error(f"Error during Tesseract OCR: {e}")

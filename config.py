@@ -77,7 +77,10 @@ FIELD_DEFINITIONS = [
             r"REV(?:ISION)?[ \t\-_]*NO[ \t\-_:]*\b(?!No\b)(?!NO\b)(?!Date\b)(?!DATE\b)(?!Desc\b)(?!DESC\b)([A-Za-z0-9]+)\b",
             r"REV[ \t\-_:]*\b(?!No\b)(?!NO\b)(?!Date\b)(?!DATE\b)(?!Desc\b)(?!DESC\b)([A-Za-z0-9]+)\b",
             r"REV\s+\b(?!No\b)(?!NO\b)(?!Date\b)(?!DATE\b)(?!Desc\b)(?!DESC\b)([A-Za-z0-9]+)\b",
-            r"REV[ \t]*-[ \t]*([A-Za-z0-9]+)"
+            r"REV[ \t]*-[ \t]*([A-Za-z0-9]+)",
+            # Merged formats common in OCR like REVO) or REV0
+            r"\bREV([0-9A-Z])(?:\)|\]|\s|$)",
+            r"\bREV(?:ISION)?[:\s\-_]*([0-9A-Za-z]{1,2})\b"
         ],
         "validation": {
             "type": "regex",
@@ -121,10 +124,9 @@ FIELD_DEFINITIONS = [
             r"QUANTITY[ \t\-_:]*([0-9]+)",
             r"No\.?[ \t]*(?:Req'd|Reqd|Required)[ \t\-_:]*([0-9]+)",
             r"NO[ \t]*OFF[ \t\-_:]*([0-9]+)",
-            r"([0-9]+)\s*QTY\s+[A-Za-z0-9\s]+\s+REQUIRED",
-            r"([0-9]+)\s*QTY\b",
-            r"([0-9]+)\s*OFFS?\b",
-            r"([0-9]+)\s*NOS?\b"
+            r"([0-9]+)\s*QTY\s+[A-Za-z0-9\s\-]+\s+REQUIRED",
+            r"([0-9]+)\s*QTY\s*(?:REQ'D|REQUIRED)",
+            r"([0-9]+)\s*(?:NOS|OFFS?|SETS?)\s*(?:REQ'D|REQUIRED)"
         ],
         "validation": {
             "type": "integer",
@@ -136,9 +138,9 @@ FIELD_DEFINITIONS = [
         "key": "sheet_number",
         "label": "Sheet",
         "regex": [
-            r"SHEET[ \t\-_]*NO[ \t\-_:]*([0-9]+)",
-            r"SHT[ \t\-_]*NO[ \t\-_:]*([0-9]+)",
-            r"SH[ \t\-_]*NO[ \t\-_:]*([0-9]+)",
+            r"SHEET[ \t\-_]*(?:NO|NC|NG|No|nr|num)?[ \t\-_:]*([0-9]+)",
+            r"SHT[ \t\-_]*(?:NO|NC|NG|No|nr|num)?[ \t\-_:]*([0-9]+)",
+            r"SH[ \t\-_]*(?:NO|NC|NG|No|nr|num)?[ \t\-_:]*([0-9]+)",
             r"SHEET[ \t\-_:]*([0-9]+)",
             r"SHT[ \t\-_:]*([0-9]+)",
             r"SH[ \t]*([0-9]+)",
@@ -223,8 +225,8 @@ FIELD_DEFINITIONS = [
         "key": "drawn_by",
         "label": "Drawn By",
         "regex": [
-            r"DRAWN[ \t]*BY[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$)",
-            r"DRN[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$)"
+            r"DRAW(?:N)?[ \t]*BY[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$|\s{2,})",
+            r"DRN[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$|\s{2,})"
         ],
         "validation": {
             "type": "text",
@@ -236,8 +238,8 @@ FIELD_DEFINITIONS = [
         "key": "checked_by",
         "label": "Checked By",
         "regex": [
-            r"CHECKED[ \t]*BY[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$)",
-            r"CHD[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$)"
+            r"CHECK(?:ED)?[ \t]*BY[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$|\s{2,})",
+            r"CHD[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$|\s{2,})"
         ],
         "validation": {
             "type": "text",
@@ -249,8 +251,8 @@ FIELD_DEFINITIONS = [
         "key": "approved_by",
         "label": "Approved By",
         "regex": [
-            r"APPROVED[ \t]*BY[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$)",
-            r"APP[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$)"
+            r"APP(?:ROVED)?[ \t]*BY[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$|\s{2,})",
+            r"APP[ \t\-_:]*([A-Za-z \t\.\-_]+)(?:\n|$|\s{2,})"
         ],
         "validation": {
             "type": "text",

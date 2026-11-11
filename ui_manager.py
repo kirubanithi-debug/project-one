@@ -200,14 +200,19 @@ class DrawingExtractorApp:
         self.ocr_status_label.pack(side="left", padx=10)
         self.check_ocr_status()
 
+        mem = learning_engine.engine.memory
         total_learned = (
-            len(learning_engine.engine.memory.get("drawing_prefixes", [])) +
-            len(learning_engine.engine.memory.get("known_projects", [])) +
-            len(learning_engine.engine.memory.get("known_clients", [])) +
-            len(learning_engine.engine.memory.get("manual_corrections", {}))
+            len(mem.get("drawing_prefixes", [])) +
+            len(mem.get("known_projects", [])) +
+            len(mem.get("known_clients", [])) +
+            len(mem.get("ocr_typo_corrections", {})) +
+            len(mem.get("manual_corrections", {}))
         )
-        self.learning_status_label = ttk.Label(right_header, text=f"🧠 Self-Learning Active ({total_learned} patterns)", font=("Segoe UI", 9, "bold"))
-        self.learning_status_label.pack(side="left", padx=10)
+        self.learning_status_label = ttk.Label(right_header, text=f"🧠 ML Active ({total_learned} rules)", font=("Segoe UI", 9, "bold"))
+        self.learning_status_label.pack(side="left", padx=8)
+
+        self.ml_center_btn = ttk.Button(right_header, text="🧠 ML Rules & Memory", command=self.open_ml_learning_center)
+        self.ml_center_btn.pack(side="left", padx=5)
 
         self.theme_btn = ttk.Button(right_header, text="🌙 Toggle Theme", command=self.toggle_theme)
         self.theme_btn.pack(side="right")
@@ -450,16 +455,36 @@ class DrawingExtractorApp:
                 sheet_num = int(sheet_num_str) if sheet_num_str else 1
             except ValueError:
                 sheet_num = 1
-                
+
+        # Multi-sheet consistency resolution:
+        # Group rows by base drawing mark/prefix (e.g. BISPL-...-DC1003)
+        drawing_groups = {}
+        for row in self.all_data:
+            dwg = row.get("drawing_number", "")
+            fn = row.get("file_name", "")
+            base_key = re.sub(r'[\s\-_]*(?:SHT|SH)[\s\-_]*\d+.*$', '', dwg, flags=re.IGNORECASE) if dwg else ""
+            if not base_key or len(base_key) < 5:
+                base_key = re.split(r'\s+(?:SHT|SH)\s+|\s+Rev\s+|_Rev', fn, flags=re.IGNORECASE)[0]
+            drawing_groups.setdefault(base_key, []).append(row)
+
+        for base_key, group_rows in drawing_groups.items():
+            if len(group_rows) > 1:
+                # Find if any sheet has an explicit BOM quantity (e.g. 8 or 4)
+                bom_qtys = [r.get("quantity") for r in group_rows if r.get("quantity") and r.get("quantity") != "1"]
+                for r in group_rows:
+                    q = r.get("quantity", "")
+                    sh_str = str(r.get("sheet_number", "1"))
+                    tot_sh_str = str(r.get("total_sheets", "1"))
+                    if q == "1":
+                        if bom_qtys:
+                            r["quantity"] = ""
+                        elif r.get("weight") and (sh_str != "1" or tot_sh_str != "1"):
+                            raw = r.get("raw_text", "")
+                            if not raw or re.search(r'\b(?:TOTAL\s*WT|WT\.?|WEIGHT|ASSEMBL)\b', raw, re.IGNORECASE):
+                                r["quantity"] = ""
+
+        for row in self.all_data:
             qty = str(row.get("quantity", ""))
-            
-            # If it is Sheet 1 and quantity is blank, default to "1"
-            if sheet_num == 1:
-                if not qty or qty.strip() == "":
-                    row["quantity"] = "1"
-                    if "_validation" in row and "quantity" in row["_validation"]:
-                        row["_validation"]["quantity"]["is_valid"] = True
-                        row["_validation"]["quantity"]["reason"] = ""
             
             # Recalculate row status safely
             if "_validation" in row:
@@ -562,13 +587,15 @@ class DrawingExtractorApp:
 
     def update_learning_badge(self):
         if hasattr(self, 'learning_status_label'):
+            mem = learning_engine.engine.memory
             total_learned = (
-                len(learning_engine.engine.memory.get("drawing_prefixes", [])) +
-                len(learning_engine.engine.memory.get("known_projects", [])) +
-                len(learning_engine.engine.memory.get("known_clients", [])) +
-                len(learning_engine.engine.memory.get("manual_corrections", {}))
+                len(mem.get("drawing_prefixes", [])) +
+                len(mem.get("known_projects", [])) +
+                len(mem.get("known_clients", [])) +
+                len(mem.get("ocr_typo_corrections", {})) +
+                len(mem.get("manual_corrections", {}))
             )
-            self.learning_status_label.configure(text=f"🧠 Self-Learning Active ({total_learned} patterns)")
+            self.learning_status_label.configure(text=f"🧠 ML Active ({total_learned} rules)")
 
     def sort_column(self, col_key):
         """Sort treeview content ascending/descending when column header is clicked."""
@@ -684,16 +711,19 @@ class DrawingExtractorApp:
             clean_val = extractor.clean_extracted_value(col_key, new_val)
             self.all_data[master_index][col_key] = clean_val
 
-            # Train learning engine from user manual correction
+            raw_text = target_item.get("raw_text", "")
+            learned_insights = {}
+
+            # Train learning engine from user manual correction with raw document OCR context
             try:
                 fn = target_item.get("file_name", "")
-                learning_engine.engine.learn_manual_edit(fn, col_key, clean_val)
+                learned_insights = learning_engine.engine.learn_manual_edit(fn, col_key, clean_val, raw_text)
             except Exception as ex:
                 logging.error(f"Failed to save manual edit learning: {ex}")
             
             re_validated = extractor.process_extracted_document(
                 self.all_data[master_index]["file_path"],
-                "",
+                raw_text,
                 self.all_data[master_index]["file_hash"]
             )
             for field in config.FIELD_DEFINITIONS:
@@ -730,8 +760,36 @@ class DrawingExtractorApp:
                 re_validated["status"] = "Valid"
                 
             self.all_data[master_index] = re_validated
+
+            # Batch Auto-Propagation: Check if other drawings in the loaded folder
+            # can be resolved automatically using the newly learned ML rule
+            propagated_count = 0
+            if col_key in ["project_name", "client_name", "drawn_by", "checked_by", "approved_by", "drawing_number"]:
+                for idx, other_row in enumerate(self.all_data):
+                    if idx != master_index:
+                        other_val = str(other_row.get(col_key, "")).strip()
+                        other_status = other_row.get("status", "")
+                        if not other_val or other_status in ["Missing", "Suspicious"] or len(other_val) < 4:
+                            other_text = other_row.get("raw_text", "")
+                            if other_text:
+                                updated_row = extractor.process_extracted_document(
+                                    other_row["file_path"],
+                                    other_text,
+                                    other_row["file_hash"]
+                                )
+                                new_extracted = updated_row.get(col_key, "")
+                                if new_extracted and new_extracted != other_val:
+                                    self.all_data[idx] = updated_row
+                                    propagated_count += 1
+
+            self.update_learning_badge()
             self.update_revision_filter_menu()
             self.apply_filters()
+
+            status_msg = f"🧠 Learned '{clean_val}' for {col_key}."
+            if propagated_count > 0:
+                status_msg += f" Auto-updated {propagated_count} other drawing(s) with this rule!"
+            self.status_bar.configure(text=status_msg)
 
         entry.bind("<Return>", save_cell_value)
         entry.bind("<FocusOut>", save_cell_value)
@@ -1203,3 +1261,155 @@ class DrawingExtractorApp:
             self.progress_bar["value"] = 0
             self.progress_label.configure(text="0/0 Files (0%)")
             self.status_bar.configure(text="Data cleared.")
+
+    def open_ml_learning_center(self):
+        """
+        Displays the Machine Learning & Extraction Rules Center dialog.
+        Shows live ML learned patterns, known projects/clients corpus, drawing prefixes,
+        label aliases, OCR typo dictionaries, and allows retraining from current table data.
+        """
+        modal = tk.Toplevel(self.root)
+        modal.title("🧠 Machine Learning & Extraction Knowledge Center")
+        modal.geometry("780x560")
+        modal.minsize(680, 480)
+        modal.transient(self.root)
+        modal.grab_set()
+
+        colors = config.THEMES[self.current_theme]
+        modal.configure(bg=colors["bg"])
+
+        main_frame = ttk.Frame(modal, padding=12)
+        main_frame.pack(fill="both", expand=True)
+
+        # Header
+        top_frame = ttk.Frame(main_frame)
+        top_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(
+            top_frame,
+            text="🧠 Machine Learning Rules & Knowledge Base",
+            font=("Segoe UI", 13, "bold"),
+            foreground=colors["primary"]
+        ).pack(side="left")
+
+        mem = learning_engine.engine.memory
+
+        # KPI Metrics Row
+        kpi_row = ttk.Frame(main_frame)
+        kpi_row.pack(fill="x", pady=(0, 10))
+
+        def make_kpi(parent, title, val):
+            card = ttk.Frame(parent, style="KPI.TFrame", padding=(10, 6))
+            card.pack(side="left", fill="both", expand=True, padx=4)
+            ttk.Label(card, text=title, font=("Segoe UI", 8, "bold"), foreground=colors["text_secondary"]).pack(anchor="w")
+            ttk.Label(card, text=str(val), font=("Segoe UI", 13, "bold"), foreground=colors["primary"]).pack(anchor="w")
+
+        make_kpi(kpi_row, "KNOWN PROJECTS", len(mem.get("known_projects", [])))
+        make_kpi(kpi_row, "KNOWN CLIENTS", len(mem.get("known_clients", [])))
+        make_kpi(kpi_row, "DRAWING PREFIXES", len(mem.get("drawing_prefixes", [])))
+        make_kpi(kpi_row, "OCR TYPO RULES", len(mem.get("ocr_typo_corrections", {})))
+
+        # Notebook tabs for structured viewing
+        notebook = ttk.Notebook(main_frame)
+        notebook.pack(fill="both", expand=True, pady=(0, 10))
+
+        # Tab 1: Known Projects & Clients
+        tab1 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab1, text="📁 Projects & Clients")
+        t1_box = tk.Text(tab1, wrap="word", bg=colors["table_bg"], fg=colors["table_fg"], font=("Consolas", 9), bd=0)
+        t1_sb = ttk.Scrollbar(tab1, orient="vertical", command=t1_box.yview)
+        t1_box.configure(yscrollcommand=t1_sb.set)
+        t1_box.pack(side="left", fill="both", expand=True)
+        t1_sb.pack(side="right", fill="y")
+
+        t1_content = "=== KNOWN PROJECTS (Matched via TF-IDF & Cosine Similarity) ===\n"
+        for p in mem.get("known_projects", []):
+            t1_content += f" • {p}\n"
+        t1_content += "\n=== KNOWN CLIENTS (Matched via RapidFuzz & TF-IDF Vectorizer) ===\n"
+        for c in mem.get("known_clients", []):
+            t1_content += f" • {c}\n"
+        t1_box.insert("1.0", t1_content)
+        t1_box.configure(state="disabled")
+
+        # Tab 2: Drawing Prefixes & Formats
+        tab2 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab2, text="🏷️ Drawing Prefixes")
+        t2_box = tk.Text(tab2, wrap="word", bg=colors["table_bg"], fg=colors["table_fg"], font=("Consolas", 9), bd=0)
+        t2_sb = ttk.Scrollbar(tab2, orient="vertical", command=t2_box.yview)
+        t2_box.configure(yscrollcommand=t2_sb.set)
+        t2_box.pack(side="left", fill="both", expand=True)
+        t2_sb.pack(side="right", fill="y")
+
+        t2_content = "=== LEARNED DRAWING NUMBER PREFIXES ===\n"
+        for pref in mem.get("drawing_prefixes", []):
+            t2_content += f" • {pref}\n"
+        t2_content += "\n=== KNOWN PERSONNEL (Drawn/Checked/Approved Initials) ===\n"
+        for person in mem.get("known_personnel", []):
+            t2_content += f" • {person}\n"
+        t2_box.insert("1.0", t2_content)
+        t2_box.configure(state="disabled")
+
+        # Tab 3: Learned Label Aliases
+        tab3 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab3, text="📑 Label Aliases")
+        t3_box = tk.Text(tab3, wrap="word", bg=colors["table_bg"], fg=colors["table_fg"], font=("Consolas", 9), bd=0)
+        t3_sb = ttk.Scrollbar(tab3, orient="vertical", command=t3_box.yview)
+        t3_box.configure(yscrollcommand=t3_sb.set)
+        t3_box.pack(side="left", fill="both", expand=True)
+        t3_sb.pack(side="right", fill="y")
+
+        t3_content = "=== LEARNED LABEL ALIASES & ANCHORS (Discovered from Drawing Layouts) ===\n\n"
+        for field, aliases in mem.get("learned_label_aliases", {}).items():
+            t3_content += f"[{field.upper()}]\n"
+            for a in aliases:
+                t3_content += f"   ➔ {a}\n"
+            t3_content += "\n"
+        t3_box.insert("1.0", t3_content)
+        t3_box.configure(state="disabled")
+
+        # Tab 4: OCR Typo Corrections
+        tab4 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab4, text="🔤 OCR Typo Repairs")
+        t4_box = tk.Text(tab4, wrap="word", bg=colors["table_bg"], fg=colors["table_fg"], font=("Consolas", 9), bd=0)
+        t4_sb = ttk.Scrollbar(tab4, orient="vertical", command=t4_box.yview)
+        t4_box.configure(yscrollcommand=t4_sb.set)
+        t4_box.pack(side="left", fill="both", expand=True)
+        t4_sb.pack(side="right", fill="y")
+
+        t4_content = "=== OCR CHARACTER & WORD TYPO AUTO-CORRECTIONS ===\n\n"
+        for typo, correct in mem.get("ocr_typo_corrections", {}).items():
+            t4_content += f" • '{typo}'  ──▶  '{correct}'\n"
+        t4_box.insert("1.0", t4_content)
+        t4_box.configure(state="disabled")
+
+        # Bottom Buttons
+        btn_bar = ttk.Frame(main_frame)
+        btn_bar.pack(fill="x", pady=(4, 0))
+
+        def retrain_from_table():
+            if not self.all_data:
+                messagebox.showinfo("Retrain ML", "No drawing data currently loaded in the table. Scan a drawings folder first.")
+                return
+            count = 0
+            for row in self.all_data:
+                if row.get("status") in ["Valid", "Suspicious"]:
+                    learning_engine.engine.learn_from_record(row)
+                    count += 1
+            self.update_learning_badge()
+            messagebox.showinfo("ML Retrained", f"Successfully retrained ML model on {count} drawing records!\nUpdated patterns and prefixes saved.")
+            modal.destroy()
+            self.open_ml_learning_center()
+
+        def reset_memory():
+            if messagebox.askyesno("Reset Memory", "Reset all learned ML memory rules back to initial defaults?"):
+                learning_engine.engine.memory = learning_engine.engine.default_structure()
+                learning_engine.engine.save_memory()
+                self.update_learning_badge()
+                messagebox.showinfo("Memory Reset", "Learned memory successfully reset to defaults.")
+                modal.destroy()
+                self.open_ml_learning_center()
+
+        ttk.Button(btn_bar, text="⚡ Retrain ML on Current Table", command=retrain_from_table).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_bar, text="🧹 Reset to Defaults", command=reset_memory).pack(side="left")
+        ttk.Button(btn_bar, text="Close", command=modal.destroy).pack(side="right")
+

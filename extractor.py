@@ -83,13 +83,15 @@ def clean_extracted_value(key, value):
     clean = str(value).strip()
     
     # Remove leading/trailing delimiters common in drawings
-    clean = re.sub(r"^[\s\-_=:;|]+|[\s\-_=:;|]+$", "", clean)
+    clean = re.sub(r"^[\s\-_=:;|\.]+|[\s\-_=:;|\.]+$", "", clean)
     
     if key == "revision":
         # OCR typo: convert single or double 'O' / 'o' to '0' / '00'
-        if clean.upper() in ["O", "OO"]:
-            clean = "0" if clean.upper() == "O" else "00"
-        clean = re.sub(r"[^A-Za-z0-9]", "", clean)
+        clean_clean = re.sub(r"[^\w]", "", clean)
+        if clean_clean.upper() in ["O", "OO"]:
+            clean = "0" if clean_clean.upper() == "O" else "00"
+        else:
+            clean = clean_clean
         if len(clean) > 2:
             clean = clean[:2]
             
@@ -103,10 +105,6 @@ def clean_extracted_value(key, value):
             clean = ""
             
     elif key == "quantity":
-        # OCR typo: 'Ooms' or 'O' -> '1' or '01'
-        clean_upper = clean.upper()
-        if "OOMS" in clean_upper or clean_upper in ["O", "OO"]:
-            return "1"
         digits = re.findall(r"\d+", clean)
         clean = digits[0] if digits else ""
         
@@ -120,12 +118,70 @@ def clean_extracted_value(key, value):
         digits = re.findall(r"\d+", clean)
         clean = digits[0] if digits else ""
         
+    elif key in ["drawn_by", "checked_by", "approved_by"]:
+        clean = re.sub(r"^[^\w]+|[^\w\.]+$", "", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+
     elif key in ["drawing_title", "project_name", "client_name"]:
         # Strip trailing repeated label text
         clean = re.sub(r"\s+(?:Title|Project Name|Client|Date|Scale|Sheet Size)\s*$", "", clean, flags=re.IGNORECASE)
+        # Strip trailing OCR artifacts from drawing title (only if mixed case / lowercase noise like 'ores' or 'oTe3')
+        if key == "drawing_title":
+            m_noise = re.search(r'\s+([a-zA-Z0-9]{2,6})$', clean)
+            if m_noise:
+                token = m_noise.group(1)
+                # If token is not all uppercase, or has digits mixed with letters, it's OCR garbage
+                if not token.isupper() or (any(c.isdigit() for c in token) and any(c.isalpha() for c in token)):
+                    clean = clean[:m_noise.start()].strip()
+        clean = re.sub(r"^[^\w\s]+|[^\w\s]+$", "", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
         
     return clean
+
+def disentangle_compound_lines(text):
+    """
+    Decomposes multi-field lines concatenated by OCR
+    (e.g., 'DRG NO: WPP-PIPE-508-0 WT: 345 kg' or 'REVO) OF 4 SHEETS' or 'SCALE 1:25 DRAWN BY: DK').
+    """
+    if not text:
+        return ""
+    anchors = [
+        r'\b(?:WT\.?|WEIGHT|KA|MASS)\b[:\s]*\d+(?:\.\d+)?(?:\s*(?:KG|kg|ka|KA|T|TON))?',
+        r'\b(?:DRAWN?\s*BY|DRN)\b[:\s]*[A-Za-z\.\s]+',
+        r'\b(?:CHECKED?\s*BY|CHKD)\b[:\s]*[A-Za-z\.\s]+',
+        r'\b(?:APPROVED?\s*BY|APPD)\b[:\s]*[A-Za-z\.\s]+',
+        r'\b(?:OF\s+\d+\s+SHEETS?)\b',
+        r'\b(?:REV(?:ISION)?\b[\s\-_:]*[A-Za-z0-9]+)',
+        r'\b(?:REV[A-Z0-9]\b)', # e.g. REVO
+        r'\b(?:SCALE)\b[:\s]*\d+:\d+',
+        r'\b(?:SHEET|SHT)\s*(?:NO|NC|NG)?[:\s]*\d+',
+        r'\b(?:QTY|QUANTITY)\b[:\s]*\d+'
+    ]
+    pattern = r'(' + r'|'.join(anchors) + r')'
+    
+    out_lines = []
+    for line in text.split('\n'):
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        matches = list(re.finditer(pattern, line_clean, re.IGNORECASE))
+        if not matches:
+            out_lines.append(line_clean)
+            continue
+        
+        cur_pos = 0
+        for m in matches:
+            if m.start() > cur_pos:
+                prefix = line_clean[cur_pos:m.start()].strip()
+                if prefix:
+                    out_lines.append(prefix)
+            out_lines.append(line_clean[m.start():m.end()].strip())
+            cur_pos = m.end()
+        if cur_pos < len(line_clean):
+            remainder = line_clean[cur_pos:].strip()
+            if remainder:
+                out_lines.append(remainder)
+    return '\n'.join(out_lines)
 
 def extract_fields_from_text(text):
     """
@@ -170,10 +226,20 @@ def extract_fields_from_text(text):
     # Line scan for quantity if missing
     if not extracted_data.get("quantity"):
         for line in lines:
-            qty_match = re.search(r'\b(\d+)\s*(?:QTY|OFF|OFFS|NOS|NO|SETS?|REQUIRED)\b', line, re.IGNORECASE)
+            # Skip lines related to weights, units, assemblies, or sheet counts
+            if re.search(r'\b(?:TOTAL\s*WT|WT\.?|WEIGHT|KA|KG|MASS|ASSEMBL|SHEETS?)\b', line, re.IGNORECASE):
+                continue
+            qty_match = re.search(r'\b(\d+)\s*(?:QTY\s+[A-Za-z0-9\s\-]+\s+REQUIRED|QTY\s*(?:REQ\'D|REQUIRED)|(?:NOS|OFFS?|SETS?)\s+(?:REQ\'D|REQUIRED))\b', line, re.IGNORECASE)
             if qty_match:
                 extracted_data["quantity"] = clean_extracted_value("quantity", qty_match.group(1))
                 break
+
+    # Guard against false quantity "1" extracted from weight notes (e.g. "TOTAL WT. FOR 1 ASSEMBLY" or "1 NO. OFF" near weight)
+    if extracted_data.get("quantity") == "1":
+        has_explicit_qty_1 = bool(re.search(r'\b(?:QTY|QUANTITY|NO\.?\s*OFF|NO\.?\s*(?:REQ\'D|REQUIRED))[:\s]*1\b|\b1\s*QTY\s+[A-Za-z0-9\s\-]+\s+REQUIRED\b|\b1\s*QTY\s*(?:REQ\'D|REQUIRED)\b', text, re.IGNORECASE))
+        if not has_explicit_qty_1:
+            if re.search(r'\b(?:TOTAL\s*WT|WT\.?|WEIGHT|MASS)\b.*?\b1\s*(?:ASSEMBL|NOS?|NO\.?\s*OFF)\b|\b1\s*(?:ASSEMBL|NOS?|NO\.?\s*OFF)\b.*?(?:TOTAL\s*WT|WT\.?|WEIGHT|MASS|KG|KA)', text, re.IGNORECASE):
+                extracted_data["quantity"] = ""
 
     # Parse numeric quantity
     qty_num = 1
@@ -293,13 +359,14 @@ def extract_fields_from_text(text):
                 extracted_data["total_sheets"] = clean_extracted_value("total_sheets", sheet_match.group(2))
                     
             # Quantity Fallbacks
-            qty_match = re.search(r'(\d+)\s*QTY\s+([A-Za-z0-9\s]+)\s+REQUIRED', line, re.IGNORECASE)
-            if qty_match:
-                extracted_data["quantity"] = clean_extracted_value("quantity", qty_match.group(1))
-            else:
-                req_match = re.search(r'No\.?[ \t]*(?:Req\'d|Reqd|Required)[ \t\-_:]*([0-9]+)', line, re.IGNORECASE)
-                if req_match:
-                    extracted_data["quantity"] = clean_extracted_value("quantity", req_match.group(1))
+            if not re.search(r'\b(?:TOTAL\s*WT|WT\.?|WEIGHT|KA|KG|MASS|ASSEMBL)\b', line, re.IGNORECASE):
+                qty_match = re.search(r'(\d+)\s*QTY\s+([A-Za-z0-9\s\-]+)\s+REQUIRED', line, re.IGNORECASE)
+                if qty_match:
+                    extracted_data["quantity"] = clean_extracted_value("quantity", qty_match.group(1))
+                else:
+                    req_match = re.search(r'No\.?[ \t]*(?:Req\'d|Reqd|Required)[ \t\-_:]*([0-9]+)', line, re.IGNORECASE)
+                    if req_match:
+                        extracted_data["quantity"] = clean_extracted_value("quantity", req_match.group(1))
 
             # Revision Remark Fallback
             if not extracted_data.get("remark"):
@@ -329,10 +396,11 @@ def process_extracted_document(file_path, text, file_hash):
     Includes robust filename fallback rules.
     """
     filename = os.path.basename(file_path)
-    raw_data = extract_fields_from_text(text)
+    clean_text = disentangle_compound_lines(text)
+    raw_data = extract_fields_from_text(clean_text)
     
-    # Apply self-learned knowledge and past user corrections
-    raw_data = learning_engine.engine.apply_learned_knowledge(raw_data, text, filename)
+    # Apply self-learned ML knowledge and past user corrections
+    raw_data = learning_engine.engine.apply_learned_knowledge(raw_data, clean_text, filename)
     
     # Match revision in filename: e.g., "- Rev 0", "_RevA", "Rev.1"
     if not raw_data.get("revision") or len(raw_data.get("revision", "")) > 2 or raw_data["revision"] in ["DR", "SH", "WT"]:
@@ -421,6 +489,7 @@ def process_extracted_document(file_path, text, file_hash):
         
     row_data["status"] = row_status
     row_data["_validation"] = validation_status
+    row_data["raw_text"] = clean_text
     
     # Self-learn from extracted data
     try:
