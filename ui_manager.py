@@ -201,6 +201,7 @@ class DrawingExtractorApp:
         self.check_ocr_status()
 
         mem = learning_engine.engine.memory
+        metrics = mem.get("model_metrics", {})
         total_learned = (
             len(mem.get("drawing_prefixes", [])) +
             len(mem.get("known_projects", [])) +
@@ -208,7 +209,12 @@ class DrawingExtractorApp:
             len(mem.get("ocr_typo_corrections", {})) +
             len(mem.get("manual_corrections", {}))
         )
-        self.learning_status_label = ttk.Label(right_header, text=f"🧠 ML Active ({total_learned} rules)", font=("Segoe UI", 9, "bold"))
+        total_samples = metrics.get("total_samples", 0)
+        self.learning_status_label = ttk.Label(
+            right_header,
+            text=f"🧠 ML Active ({total_learned} rules | {total_samples} samples)",
+            font=("Segoe UI", 9, "bold")
+        )
         self.learning_status_label.pack(side="left", padx=8)
 
         self.ml_center_btn = ttk.Button(right_header, text="🧠 ML Rules & Memory", command=self.open_ml_learning_center)
@@ -430,31 +436,34 @@ class DrawingExtractorApp:
 
     def post_process_data(self):
         """
-        Post-process all_data to default sheet numbers and Sheet 1 quantities.
-        Only Sheet 1 (or sheets with the BOM box) should show quantities.
-        Sheets > 1 have quantities cleared to empty by extractor.py.
+        Post-process all_data to default sheet numbers, sync total_sheets across
+        multi-sheet drawing groups, and ensure Sheet 1 / BOM quantities are preserved
+        without double-counting across secondary sheets.
         """
         import re
         import logging
+
         for row in self.all_data:
             filename = row.get("file_name", "")
-            
-            # Fix sheet number if missing (e.g. from filename SHT support)
-            sheet_num_str = str(row.get("sheet_number", ""))
-            if not sheet_num_str or sheet_num_str.strip() == "":
+
+            # Fix sheet number / total sheets if missing (e.g. from filename SHT support)
+            sheet_num_str = str(row.get("sheet_number", "")).strip()
+            if not sheet_num_str:
                 sheet_match = re.search(r'(?:SHT|SH)[ \t\-_]*(\d+)', filename, re.IGNORECASE)
                 if sheet_match:
-                    sheet_num_str = str(int(sheet_match.group(1)))
-                    row["sheet_number"] = sheet_num_str
+                    row["sheet_number"] = sheet_match.group(1).zfill(2)
                     if "_validation" in row and "sheet_number" in row["_validation"]:
                         row["_validation"]["sheet_number"]["is_valid"] = True
                         row["_validation"]["sheet_number"]["reason"] = ""
-            
-            # Check sheet number to determine defaulting
-            try:
-                sheet_num = int(sheet_num_str) if sheet_num_str else 1
-            except ValueError:
-                sheet_num = 1
+
+            tot_sheets_str = str(row.get("total_sheets", "")).strip()
+            if not tot_sheets_str:
+                tot_match = re.search(r'(?:SHT|SH)[ \t\-_]*\d+[ \t]*OF[ \t]*(\d+)', filename, re.IGNORECASE)
+                if tot_match:
+                    row["total_sheets"] = tot_match.group(1).zfill(2)
+                    if "_validation" in row and "total_sheets" in row["_validation"]:
+                        row["_validation"]["total_sheets"]["is_valid"] = True
+                        row["_validation"]["total_sheets"]["reason"] = ""
 
         # Multi-sheet consistency resolution:
         # Group rows by base drawing mark/prefix (e.g. BISPL-...-DC1003)
@@ -469,19 +478,67 @@ class DrawingExtractorApp:
 
         for base_key, group_rows in drawing_groups.items():
             if len(group_rows) > 1:
-                # Find if any sheet has an explicit BOM quantity (e.g. 8 or 4)
-                bom_qtys = [r.get("quantity") for r in group_rows if r.get("quantity") and r.get("quantity") != "1"]
+                # 1. Synchronize total_sheets across all rows in the group
+                max_tot = 0
                 for r in group_rows:
-                    q = r.get("quantity", "")
-                    sh_str = str(r.get("sheet_number", "1"))
-                    tot_sh_str = str(r.get("total_sheets", "1"))
-                    if q == "1":
-                        if bom_qtys:
+                    try:
+                        t_val = int(str(r.get("total_sheets", "")).strip() or "0")
+                        if t_val > max_tot:
+                            max_tot = t_val
+                    except ValueError:
+                        pass
+                if max_tot == 0:
+                    max_tot = len(group_rows)
+                tot_fmt = f"{max_tot:02d}"
+                for r in group_rows:
+                    if not str(r.get("total_sheets", "")).strip():
+                        r["total_sheets"] = tot_fmt
+
+                # 2. Resolve quantities across the multi-sheet group
+                # Find if any sheet has an explicit BOM quantity > 1 (e.g. 8, 4, or 2)
+                bom_rows = [
+                    r for r in group_rows
+                    if str(r.get("quantity", "")).strip().isdigit() and int(str(r.get("quantity", "")).strip()) > 1
+                ]
+                if bom_rows:
+                    bom_target = bom_rows[0]
+                    for r in group_rows:
+                        if r is not bom_target and str(r.get("quantity", "")).strip() == "1":
                             r["quantity"] = ""
-                        elif r.get("weight") and (sh_str != "1" or tot_sh_str != "1"):
-                            raw = r.get("raw_text", "")
-                            if not raw or re.search(r'\b(?:TOTAL\s*WT|WT\.?|WEIGHT|ASSEMBL)\b', raw, re.IGNORECASE):
+                else:
+                    # No explicit BOM qty > 1: Sheet 1 gets quantity "1", secondary sheets cleared
+                    for idx, r in enumerate(group_rows):
+                        try:
+                            sh_num = int(str(r.get("sheet_number", "")).strip() or "0")
+                        except ValueError:
+                            sh_num = 0
+
+                        if sh_num == 1 or (sh_num == 0 and idx == 0):
+                            if not str(r.get("quantity", "")).strip():
+                                r["quantity"] = "1"
+                        elif sh_num > 1:
+                            if str(r.get("quantity", "")).strip() == "1":
                                 r["quantity"] = ""
+            else:
+                # Single-sheet (or standalone) drawing
+                r = group_rows[0]
+                sh_str = str(r.get("sheet_number", "")).strip()
+                tot_str = str(r.get("total_sheets", "")).strip()
+
+                if not sh_str:
+                    r["sheet_number"] = "01"
+                    sh_num = 1
+                else:
+                    try:
+                        sh_num = int(sh_str)
+                    except ValueError:
+                        sh_num = 1
+
+                if not tot_str:
+                    r["total_sheets"] = "01" if sh_num <= 1 else f"{sh_num:02d}"
+
+                if sh_num == 1 and not str(r.get("quantity", "")).strip():
+                    r["quantity"] = "1"
 
         for row in self.all_data:
             qty = str(row.get("quantity", ""))
@@ -588,6 +645,7 @@ class DrawingExtractorApp:
     def update_learning_badge(self):
         if hasattr(self, 'learning_status_label'):
             mem = learning_engine.engine.memory
+            metrics = mem.get("model_metrics", {})
             total_learned = (
                 len(mem.get("drawing_prefixes", [])) +
                 len(mem.get("known_projects", [])) +
@@ -595,7 +653,10 @@ class DrawingExtractorApp:
                 len(mem.get("ocr_typo_corrections", {})) +
                 len(mem.get("manual_corrections", {}))
             )
-            self.learning_status_label.configure(text=f"🧠 ML Active ({total_learned} rules)")
+            total_samples = metrics.get("total_samples", 0)
+            self.learning_status_label.configure(
+                text=f"🧠 ML Active ({total_learned} rules | {total_samples} samples)"
+            )
 
     def sort_column(self, col_key):
         """Sort treeview content ascending/descending when column header is clicked."""
@@ -762,14 +823,16 @@ class DrawingExtractorApp:
             self.all_data[master_index] = re_validated
 
             # Batch Auto-Propagation: Check if other drawings in the loaded folder
-            # can be resolved automatically using the newly learned ML rule
+            # can be resolved automatically using the newly learned ML rule/model
             propagated_count = 0
-            if col_key in ["project_name", "client_name", "drawn_by", "checked_by", "approved_by", "drawing_number"]:
+            manual_corr_map = learning_engine.engine.memory.get("manual_corrections", {})
+            if col_key in ["project_name", "client_name", "drawn_by", "checked_by", "approved_by", "drawing_number", "weight", "quantity", "drawing_title", "remark"]:
+                is_ml_model_field = col_key in ["weight", "quantity", "drawing_title", "remark"]
                 for idx, other_row in enumerate(self.all_data):
-                    if idx != master_index:
+                    if idx != master_index and other_row.get("file_name") not in manual_corr_map:
                         other_val = str(other_row.get(col_key, "")).strip()
                         other_status = other_row.get("status", "")
-                        if not other_val or other_status in ["Missing", "Suspicious"] or len(other_val) < 4:
+                        if is_ml_model_field or not other_val or other_status in ["Missing", "Suspicious"] or len(other_val) < 4:
                             other_text = other_row.get("raw_text", "")
                             if other_text:
                                 updated_row = extractor.process_extracted_document(
@@ -781,14 +844,22 @@ class DrawingExtractorApp:
                                 if new_extracted and new_extracted != other_val:
                                     self.all_data[idx] = updated_row
                                     propagated_count += 1
+                if propagated_count > 0:
+                    try:
+                        self.post_process_data()
+                    except Exception as ex:
+                        logging.error(f"Error re-running post_process_data after propagation: {ex}")
 
             self.update_learning_badge()
             self.update_revision_filter_menu()
             self.apply_filters()
 
+            learned_summary = ", ".join(learned_insights.get("learned_patterns", []))
             status_msg = f"🧠 Learned '{clean_val}' for {col_key}."
+            if learned_summary:
+                status_msg += f" ({learned_summary})"
             if propagated_count > 0:
-                status_msg += f" Auto-updated {propagated_count} other drawing(s) with this rule!"
+                status_msg += f" Auto-updated {propagated_count} other drawing(s)!"
             self.status_bar.configure(text=status_msg)
 
         entry.bind("<Return>", save_cell_value)
@@ -1206,6 +1277,11 @@ class DrawingExtractorApp:
                         self.post_process_data()
                     except Exception as ex:
                         logging.error(f"Error in post_process_data: {ex}", exc_info=True)
+                    try:
+                        if getattr(learning_engine.engine, "_pending_new_samples", 0) > 0:
+                            learning_engine.engine.retrain_models(save_mem=True)
+                    except Exception as ex:
+                        logging.error(f"Error retraining ML models at scan end: {ex}", exc_info=True)
                     self.apply_filters()
                     
                     if self.cancel_scan:
@@ -1293,6 +1369,7 @@ class DrawingExtractorApp:
         ).pack(side="left")
 
         mem = learning_engine.engine.memory
+        metrics = mem.get("model_metrics", {})
 
         # KPI Metrics Row
         kpi_row = ttk.Frame(main_frame)
@@ -1304,14 +1381,54 @@ class DrawingExtractorApp:
             ttk.Label(card, text=title, font=("Segoe UI", 8, "bold"), foreground=colors["text_secondary"]).pack(anchor="w")
             ttk.Label(card, text=str(val), font=("Segoe UI", 13, "bold"), foreground=colors["primary"]).pack(anchor="w")
 
-        make_kpi(kpi_row, "KNOWN PROJECTS", len(mem.get("known_projects", [])))
-        make_kpi(kpi_row, "KNOWN CLIENTS", len(mem.get("known_clients", [])))
-        make_kpi(kpi_row, "DRAWING PREFIXES", len(mem.get("drawing_prefixes", [])))
-        make_kpi(kpi_row, "OCR TYPO RULES", len(mem.get("ocr_typo_corrections", {})))
+        make_kpi(kpi_row, "WEIGHT ML ACC", f"{metrics.get('weight_accuracy', 0.0)}%")
+        make_kpi(kpi_row, "QTY ML ACC", f"{metrics.get('quantity_accuracy', 0.0)}%")
+        make_kpi(kpi_row, "LINE ML ACC", f"{metrics.get('line_accuracy', 0.0)}%")
+        make_kpi(kpi_row, "TRAINING SAMPLES", metrics.get("total_samples", 0))
+        make_kpi(kpi_row, "KNOWN PREFIXES", len(mem.get("drawing_prefixes", [])))
 
         # Notebook tabs for structured viewing
         notebook = ttk.Notebook(main_frame)
         notebook.pack(fill="both", expand=True, pady=(0, 10))
+
+        # Tab 0: Supervised ML Models Status
+        tab0 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab0, text="🤖 ML Models")
+        t0_box = tk.Text(tab0, wrap="word", bg=colors["table_bg"], fg=colors["table_fg"], font=("Consolas", 9), bd=0)
+        t0_sb = ttk.Scrollbar(tab0, orient="vertical", command=t0_box.yview)
+        t0_box.configure(yscrollcommand=t0_sb.set)
+        t0_box.pack(side="left", fill="both", expand=True)
+        t0_sb.pack(side="right", fill="y")
+
+        w_fitted = getattr(learning_engine.engine.weight_ranker, "is_fitted", False)
+        q_fitted = getattr(learning_engine.engine.quantity_ranker, "is_fitted", False)
+        l_fitted = getattr(learning_engine.engine.line_classifier, "is_fitted", False)
+        ml_data = mem.get("ml_training_data", {})
+
+        t0_content = (
+            "=== SUPERVISED MACHINE LEARNING MODELS (scikit-learn) ===\n\n"
+            f" • Weight Candidate Ranker (TF-IDF + Domain Features + LogisticRegression)\n"
+            f"     Status: {'TRAINED & ACTIVE' if w_fitted else 'NOT TRAINED'} | "
+            f"Train Acc: {metrics.get('weight_accuracy', 0.0)}% | "
+            f"Total Samples: {metrics.get('weight_samples', 0)} "
+            f"(User/Auto: {len(ml_data.get('weight_samples', []))})\n\n"
+            f" • Quantity Candidate Ranker (TF-IDF + BOM Features + LogisticRegression)\n"
+            f"     Status: {'TRAINED & ACTIVE' if q_fitted else 'NOT TRAINED'} | "
+            f"Train Acc: {metrics.get('quantity_accuracy', 0.0)}% | "
+            f"Total Samples: {metrics.get('quantity_samples', 0)} "
+            f"(User/Auto: {len(ml_data.get('quantity_samples', []))})\n\n"
+            f" • Line Field Classifier (Word+Char TF-IDF + LogisticRegression)\n"
+            f"     Status: {'TRAINED & ACTIVE' if l_fitted else 'NOT TRAINED'} | "
+            f"Train Acc: {metrics.get('line_accuracy', 0.0)}% | "
+            f"Total Samples: {metrics.get('line_samples', 0)} "
+            f"(User/Auto: {len(ml_data.get('line_samples', []))})\n\n"
+            f" • Last Model Training: {metrics.get('last_trained') or 'Startup Bootstrap'}\n"
+            f" • Manual User Corrections Recorded: {len(mem.get('manual_corrections', {}))} files\n\n"
+            "TIP: Editing any cell in the table automatically mines hard-negative\n"
+            "examples from the drawing text and retrains the ML models in real time."
+        )
+        t0_box.insert("1.0", t0_content)
+        t0_box.configure(state="disabled")
 
         # Tab 1: Known Projects & Clients
         tab1 = ttk.Frame(notebook, padding=8)
@@ -1388,24 +1505,41 @@ class DrawingExtractorApp:
 
         def retrain_from_table():
             if not self.all_data:
-                messagebox.showinfo("Retrain ML", "No drawing data currently loaded in the table. Scan a drawings folder first.")
+                metrics = learning_engine.engine.retrain_models(force=True, save_mem=True)
+                self.update_learning_badge()
+                messagebox.showinfo(
+                    "ML Retrained",
+                    f"Retrained ML models on baseline + saved memory!\n"
+                    f"Weight Acc: {metrics.get('weight_accuracy')}% | "
+                    f"Qty Acc: {metrics.get('quantity_accuracy')}% | "
+                    f"Line Acc: {metrics.get('line_accuracy')}%"
+                )
+                modal.destroy()
+                self.open_ml_learning_center()
                 return
             count = 0
             for row in self.all_data:
                 if row.get("status") in ["Valid", "Suspicious"]:
                     learning_engine.engine.learn_from_record(row)
                     count += 1
+            metrics = learning_engine.engine.retrain_models(force=True, save_mem=True)
             self.update_learning_badge()
-            messagebox.showinfo("ML Retrained", f"Successfully retrained ML model on {count} drawing records!\nUpdated patterns and prefixes saved.")
+            messagebox.showinfo(
+                "ML Retrained",
+                f"Successfully retrained ML models on {count} drawing records!\n"
+                f"Weight ML: {metrics.get('weight_accuracy')}% | "
+                f"Qty ML: {metrics.get('quantity_accuracy')}% | "
+                f"Line ML: {metrics.get('line_accuracy')}%"
+            )
             modal.destroy()
             self.open_ml_learning_center()
 
         def reset_memory():
-            if messagebox.askyesno("Reset Memory", "Reset all learned ML memory rules back to initial defaults?"):
+            if messagebox.askyesno("Reset Memory", "Reset all learned ML memory rules and models back to initial defaults?"):
                 learning_engine.engine.memory = learning_engine.engine.default_structure()
-                learning_engine.engine.save_memory()
+                learning_engine.engine.retrain_models(force=True, save_mem=True)
                 self.update_learning_badge()
-                messagebox.showinfo("Memory Reset", "Learned memory successfully reset to defaults.")
+                messagebox.showinfo("Memory Reset", "Learned memory and ML models successfully reset to defaults.")
                 modal.destroy()
                 self.open_ml_learning_center()
 

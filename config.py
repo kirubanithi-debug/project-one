@@ -93,22 +93,22 @@ FIELD_DEFINITIONS = [
         "key": "weight",
         "label": "Weight",
         "regex": [
-            # Total weight for all assemblies (e.g. 152.00 TOTAL WT. FOR 3 ASSEMBLIES)
-            r"([0-9\.,]+)\s*(?:KG|kg|KA|ka|T|t|TON|ton)?\s*TOTAL\s*WT\.\s*FOR\s*[0-9]+\s*ASSEMBLIES?",
-            r"([0-9\.,]+)\s*(?:KG|kg|KA|ka|T|t|TON|ton)?\s*TOTAL\s*WT\.\s*FOR\s*ALL\s*ASSEMBLIES?",
-            r"TOTAL\s*WT\.\s*FOR\s*[0-9]+\s*ASSEMBLIES?\s*([0-9\.,]+)",
-            r"TOTAL\s*WT\.\s*FOR\s*ALL\s*ASSEMBLIES?\s*([0-9\.,]+)",
-            r"([0-9\.,]+)\s*(?:KG|kg|KA|ka)\s*TOTAL\s*(?:WEIGHT|WT)",
-            r"TOTAL[ \t]*WEIGHT[ \t\-_:]*([0-9\.,]+)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
-            r"TOTAL[ \t]*WT[ \t\-_:]*([0-9\.,]+)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
-            r"NET[ \t]*WEIGHT[ \t\-_:]*([0-9\.,]+)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
+            # Total weight for multiple/all assemblies (e.g. 152.00 TOTAL WT. FOR 3 ASSEMBLIES)
+            r"([0-9][0-9\.,]*)[ \t]*(?:KG|kg|KA|ka|T|t|TON|ton)?[ \t]*TOTAL[ \t]*WT\.[ \t]*FOR[ \t]*(?:[2-9]|[1-9][0-9]+)[ \t]*ASSEMBLIES?",
+            r"([0-9][0-9\.,]*)[ \t]*(?:KG|kg|KA|ka|T|t|TON|ton)?[ \t]*TOTAL[ \t]*WT\.[ \t]*FOR[ \t]*ALL[ \t]*ASSEMBLIES?",
+            r"TOTAL[ \t]*WT\.[ \t]*FOR[ \t]*(?:[2-9]|[1-9][0-9]+)[ \t]*ASSEMBLIES?[ \t\-_:]*([0-9][0-9\.,]*)",
+            r"TOTAL[ \t]*WT\.[ \t]*FOR[ \t]*ALL[ \t]*ASSEMBLIES?[ \t\-_:]*([0-9][0-9\.,]*)",
+            r"([0-9][0-9\.,]*)[ \t]*(?:KG|kg|KA|ka)[ \t]*TOTAL[ \t]*(?:WEIGHT|WT)",
+            r"TOTAL[ \t]*WEIGHT[ \t\-_:]*([0-9][0-9\.,]*)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
+            r"TOTAL[ \t]*WT[ \t\-_:]*([0-9][0-9\.,]*)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
+            r"NET[ \t]*WEIGHT[ \t\-_:]*([0-9][0-9\.,]*)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
             # Unit weight for 1 assembly (fallback if total weight for all assemblies is not explicitly listed)
-            r"([0-9\.,]+)\s*(?:KG|kg|KA|ka|T|t|TON|ton)?\s*TOTAL\s*WT\.\s*FOR\s*1\s*ASSEMBLY",
-            r"([0-9\.,]+)\s*(?:KG|kg|KA|ka|T|t|TON|ton)?\s*WT\.?\s*FOR\s*1\s*ASSEMBLY",
-            r"TOTAL\s*WT\.\s*FOR\s*1\s*ASSEMBLY\s*([0-9\.,]+)",
-            r"WT[ \t\-_:]*([0-9\.,]+)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
-            r"WEIGHT[ \t\-_:]*([0-9\.,]+)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
-            r"MASS[ \t\-_:]*([0-9\.,]+)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?"
+            r"([0-9][0-9\.,]*)[ \t]*(?:KG|kg|KA|ka|T|t|TON|ton)?[ \t]*TOTAL[ \t]*WT\.[ \t]*FOR[ \t]*1[ \t]*ASSEMBLY",
+            r"([0-9][0-9\.,]*)[ \t]*(?:KG|kg|KA|ka|T|t|TON|ton)?[ \t]*WT\.?[ \t]*FOR[ \t]*1[ \t]*ASSEMBLY",
+            r"TOTAL[ \t]*WT\.[ \t]*FOR[ \t]*1[ \t]*ASSEMBLY[ \t\-_:]*([0-9][0-9\.,]*)",
+            r"WT[ \t\-_:]*([0-9][0-9\.,]*)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
+            r"WEIGHT[ \t\-_:]*([0-9][0-9\.,]*)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?",
+            r"MASS[ \t\-_:]*([0-9][0-9\.,]*)[ \t]*(?:kg|KG|ka|KA|t|T|ton|TON)?"
         ],
         "validation": {
             "type": "numeric",
@@ -124,6 +124,8 @@ FIELD_DEFINITIONS = [
             r"QUANTITY[ \t\-_:]*([0-9]+)",
             r"No\.?[ \t]*(?:Req'd|Reqd|Required)[ \t\-_:]*([0-9]+)",
             r"NO[ \t]*OFF[ \t\-_:]*([0-9]+)",
+            r"([0-9]+)[ \t]*NUMBER\.?[ \t]*(?:REQ'D|REQD|REQUIRED)",
+            r"NUMBER\.?[ \t]*(?:REQ'D|REQD|REQUIRED)[ \t\-_:]*([0-9]+)",
             r"([0-9]+)\s*QTY\s+[A-Za-z0-9\s\-]+\s+REQUIRED",
             r"([0-9]+)\s*QTY\s*(?:REQ'D|REQUIRED)",
             r"([0-9]+)\s*(?:NOS|OFFS?|SETS?)\s*(?:REQ'D|REQUIRED)"
